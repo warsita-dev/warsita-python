@@ -1,0 +1,2419 @@
+openapi: 3.1.0
+info:
+  title: Warsita API
+  version: "1.0"
+  summary: Send and receive WhatsApp messages over HTTP.
+  description: |
+    Warsita links a WhatsApp number as a linked device (like WhatsApp Web) and exposes it as a REST API:
+    send messages with a session API key, manage sessions with a personal access token, and receive
+    events by signed webhook. Guides: https://warsita.com/docs
+
+    Two credentials, both sent as `Authorization: Bearer …`:
+
+    - **Session API key** (`wsk_…`): one per session, for messages, contacts and groups. The key picks
+      the session.
+    - **Personal access token** (`wsp_…`): one per workspace, for everything. Endpoints that act on a
+      session's WhatsApp account then need `session_id`.
+
+    Errors are JSON: `{"error": {"code": "…", "message": "…"}}`.
+  contact:
+    email: hello@warsita.com
+servers:
+  - url: https://api.warsita.com
+security:
+  - personalAccessToken: []
+tags:
+  - name: Messages
+    description: Send messages and follow their status.
+  - name: Media
+    description: Upload files to send, and download received media.
+  - name: Account
+    description: The linked WhatsApp account and its presence.
+  - name: Contacts
+    description: Look up WhatsApp accounts.
+  - name: Groups
+    description: Groups the session's account belongs to, and managing them.
+  - name: Sessions
+    description: Link, manage and monitor WhatsApp numbers. Personal access token only.
+  - name: Webhook
+    description: Where a session's events are delivered. Personal access token only.
+  - name: Health
+    description: Whether the API is up.
+paths:
+  /v1/messages:
+    post:
+      tags: [Messages]
+      operationId: sendMessage
+      summary: Send a message
+      description: |
+        Queues a message and answers at once with `status: "queued"`. The session sends it in the
+        background; follow it with `GET /v1/messages/{id}` or the `message.sent` and
+        `message-receipt.update` webhooks. The type follows from the field you send: `text`, or exactly
+        one of `image`, `video`, `audio`, `document`, `sticker`, `location`, `contact`, `poll`. Media is downloaded from its
+        URL when the message is sent (images up to 16 MB, other media up to 64 MB); a download that fails
+        marks the message `failed`.
+
+        Send an `Idempotency-Key` to make retries safe: repeating the request with the same key returns
+        the message the first request queued, with `Idempotent-Replayed: true`, instead of sending it again.
+      security:
+        - sessionApiKey: []
+        - personalAccessToken: []
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          description: |
+            A unique value per message, such as an order ID or a UUID (up to 255 printable ASCII characters).
+            Keys belong to the session and are remembered as long as the message is in its log (30 days, or
+            until the log is cleared). The same key with a different request is refused with `422`.
+          schema: { type: string, maxLength: 255, examples: ["order-1042-shipped"] }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SendMessage" }
+            examples:
+              text:
+                summary: Text
+                value: { to: "+6281234567890", text: "Your order has shipped." }
+              image:
+                summary: Image with a caption
+                value: { to: "+6281234567890", image: { url: "https://example.com/receipt.png", caption: "Receipt" } }
+              reply:
+                summary: Reply quoting a received message
+                value: { to: "+6281234567890", text: "Yes, it ships today.", reply_to: { id: "3EB0A1B2C3D4E5F6", text: "Is my order on its way?" } }
+              poll:
+                summary: Poll
+                value: { to: "120363012345678901@g.us", poll: { name: "Which day works?", options: ["Friday", "Saturday"], selectable_count: 1 } }
+              group:
+                summary: Group message with a mention
+                value: { to: "120363012345678901@g.us", text: "Welcome @6281234567890!", mentions: ["+6281234567890"] }
+      responses:
+        "202":
+          description: Queued, or the message an earlier request with the same `Idempotency-Key` queued.
+          headers:
+            Idempotent-Replayed:
+              description: "`true` when this answer is a repeat of an earlier request with the same `Idempotency-Key`."
+              schema: { type: string, enum: ["true"] }
+            X-RateLimit-Limit: { $ref: "#/components/headers/RateLimitLimit" }
+            X-RateLimit-Remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+            X-RateLimit-Reset: { $ref: "#/components/headers/RateLimitReset" }
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: { data: { $ref: "#/components/schemas/Message" } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "402": { $ref: "#/components/responses/Suspended" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422":
+          description: The `Idempotency-Key` was already used for a different message (`idempotency_key_reused`).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+    get:
+      tags: [Messages]
+      operationId: listMessages
+      summary: List messages
+      description: The session's messages, newest first. Page back with `before`, the `id` of the last message you got.
+      security:
+        - sessionApiKey: []
+        - personalAccessToken: []
+      parameters:
+        - $ref: "#/components/parameters/SessionIDQuery"
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 25 }
+        - name: status
+          in: query
+          schema: { $ref: "#/components/schemas/MessageStatus" }
+        - name: before
+          in: query
+          description: A message id; returns the messages older than it.
+          schema: { type: string, examples: ["msg_8sJq2LwP0aZx4TnB6kRv"] }
+      responses:
+        "200":
+          description: Messages.
+          headers:
+            X-RateLimit-Limit: { $ref: "#/components/headers/RateLimitLimit" }
+            X-RateLimit-Remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+            X-RateLimit-Reset: { $ref: "#/components/headers/RateLimitReset" }
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { type: array, items: { $ref: "#/components/schemas/Message" } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+  /v1/messages/{id}:
+    get:
+      tags: [Messages]
+      operationId: getMessage
+      summary: Get a message
+      security:
+        - sessionApiKey: []
+        - personalAccessToken: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, examples: ["msg_8sJq2LwP0aZx4TnB6kRv"] }
+        - $ref: "#/components/parameters/SessionIDQuery"
+      responses:
+        "200":
+          description: The message.
+          headers:
+            X-RateLimit-Limit: { $ref: "#/components/headers/RateLimitLimit" }
+            X-RateLimit-Remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+            X-RateLimit-Reset: { $ref: "#/components/headers/RateLimitReset" }
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: { data: { $ref: "#/components/schemas/Message" } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+    patch:
+      tags: [Messages]
+      operationId: editMessage
+      summary: Edit a sent message
+      description: Changes the text of a text message the session sent, within 20 minutes of sending. Recipients see it marked as edited; the message log keeps the original text.
+      security:
+        - sessionApiKey: []
+        - personalAccessToken: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, examples: ["msg_8sJq2LwP0aZx4TnB6kRv"] }
+        - $ref: "#/components/parameters/SessionIDQuery"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [text]
+              properties:
+                text: { type: string, maxLength: 65536 }
+      responses:
+        "204":
+          description: Edited.
+          headers:
+            X-RateLimit-Limit: { $ref: "#/components/headers/RateLimitLimit" }
+            X-RateLimit-Remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+            X-RateLimit-Reset: { $ref: "#/components/headers/RateLimitReset" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: Not sent yet (`not_sent`), or not a text message or older than 20 minutes (`not_editable`).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "502": { $ref: "#/components/responses/WhatsAppError" }
+        "504": { $ref: "#/components/responses/RuntimeTimeout" }
+    delete:
+      tags: [Messages]
+      operationId: deleteMessage
+      summary: Delete a sent message for everyone
+      description: Deletes a message the session sent for everyone in the chat ("This message was deleted"). It stays in the message log.
+      security:
+        - sessionApiKey: []
+        - personalAccessToken: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, examples: ["msg_8sJq2LwP0aZx4TnB6kRv"] }
+        - $ref: "#/components/parameters/SessionIDQuery"
+      responses:
+        "204":
+          description: Deleted for everyone.
+          headers:
+            X-RateLimit-Limit: { $ref: "#/components/headers/RateLimitLimit" }
+            X-RateLimit-Remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+            X-RateLimit-Reset: { $ref: "#/components/headers/RateLimitReset" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: Not sent yet (`not_sent`).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "502": { $ref: "#/components/responses/WhatsAppError" }
+        "504": { $ref: "#/components/responses/RuntimeTimeout" }
+  /v1/messages/{id}/resend:
+    post:
+      tags: [Messages]
+      operationId: resendMessage
+      summary: Resend a failed message
+      description: Queues a failed message again as a new message with the same content. Failed messages keep their content for this until the log is deleted (30 days).
+      security:
+        - sessionApiKey: []
+        - personalAccessToken: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, examples: ["msg_8sJq2LwP0aZx4TnB6kRv"] }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                session_id: { $ref: "#/components/schemas/SessionIDField" }
+      responses:
+        "202":
+          description: Queued as a new message.
+          headers:
+            X-RateLimit-Limit: { $ref: "#/components/headers/RateLimitLimit" }
+            X-RateLimit-Remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+            X-RateLimit-Reset: { $ref: "#/components/headers/RateLimitReset" }
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: { data: { $ref: "#/components/schemas/Message" } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "402": { $ref: "#/components/responses/Suspended" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: "The message did not fail, or it failed before 28 October 2026 when failed messages did not keep their content (`not_resendable`)."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+  /v1/messages/react:
+    post:
+      tags: [Messages]
+      operationId: reactToMessage
+      summary: React to a message
+      description: |
+        Reacts with an emoji to a message the session sent (`message_id` is its `msg_…` id) or
+        received (`message_id` is `id` from `messages.received`, with its `chat` and, in groups, its
+        `sender`). An empty `emoji` removes the reaction.
+      security:
+        - sessionApiKey: []
+        - personalAccessToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [message_id, emoji]
+              properties:
+                session_id: { $ref: "#/components/schemas/SessionIDField" }
+                message_id: { type: string, examples: ["3EB0A1B2C3D4E5F6"] }
+                chat: { type: string, description: "The chat of a received message.", examples: ["6281234567890@s.whatsapp.net"] }
+                sender: { type: string, description: "Who sent a received group message." }
+                emoji: { type: string, examples: ["👍"] }
+      responses:
+        "204":
+          description: Reaction sent.
+          headers:
+            X-RateLimit-Limit: { $ref: "#/components/headers/RateLimitLimit" }
+            X-RateLimit-Remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+            X-RateLimit-Reset: { $ref: "#/components/headers/RateLimitReset" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: A `msg_…` message that was not sent yet (`not_sent`).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "502": { $ref: "#/components/responses/WhatsAppError" }
+        "504": { $ref: "#/components/responses/RuntimeTimeout" }
+  /v1/messages/read:
+    post:
+      tags: [Messages]
+      operationId: markRead
+      summary: Mark messages as read
+      description: Sends read receipts (blue ticks) for received messages.
+      security:
+        - sessionApiKey: []
+        - personalAccessToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [chat, ids]
+              properties:
+                session_id: { $ref: "#/components/schemas/SessionIDField" }
+                chat: { type: string, description: The chat's JID., examples: ["6281234567890@s.whatsapp.net"] }
+                sender:
+                  type: string
+                  description: The sender's JID, needed in groups. Defaults to `chat`.
+                ids:
+                  type: array
+                  minItems: 1
+                  maxItems: 100
+                  description: WhatsApp message ids (`id` from `messages.received`).
+                  items: { type: string }
+      responses:
+        "204":
+          description: Receipts sent.
+          headers:
+            X-RateLimit-Limit: { $ref: "#/components/headers/RateLimitLimit" }
+            X-RateLimit-Remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+            X-RateLimit-Reset: { $ref: "#/components/headers/RateLimitReset" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "502": { $ref: "#/components/responses/WhatsAppError" }
+        "504": { $ref: "#/components/responses/RuntimeTimeout" }
+  /v1/media:
+    post:
+      tags: [Media]
+      operationId: uploadMedia
+      summary: Upload a file
+      description: |
+        Keeps a file of up to 30 MB for 7 days, to send with `media_id` in place of `url`. Send
+        larger files by URL. With an API key, the file can be sent by that session; with a token,
+        by any of the workspace's sessions.
+      security:
+        - sessionApiKey: []
+        - personalAccessToken: []
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file: { type: string, format: binary }
+      responses:
+        "201":
+          description: Uploaded.
+          headers:
+            X-RateLimit-Limit: { $ref: "#/components/headers/RateLimitLimit" }
+            X-RateLimit-Remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+            X-RateLimit-Reset: { $ref: "#/components/headers/RateLimitReset" }
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: { data: { $ref: "#/components/schemas/MediaFile" } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "402": { $ref: "#/components/responses/Suspended" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+  /v1/media/{id}:
+    get:
+      tags: [Media]
+      operationId: getMedia
+      summary: Get a file
+      description: An uploaded file, or received media kept by `download_media`, with a link to download it for the next hour.
+      security:
+        - sessionApiKey: []
+        - personalAccessToken: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, examples: ["med_4hT8kW2nQ9xZ1vB7cR5p"] }
+      responses:
+        "200":
+          description: The file.
+          headers:
+            X-RateLimit-Limit: { $ref: "#/components/headers/RateLimitLimit" }
+            X-RateLimit-Remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+            X-RateLimit-Reset: { $ref: "#/components/headers/RateLimitReset" }
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/MediaFile" }
+                  url: { type: string, format: uri, description: "Download link, valid for an hour." }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+  /v1/account:
+    get:
+      tags: [Account]
+      operationId: getAccount
+      summary: The linked account
+      description: The WhatsApp account the session is linked to. Profile details (about, picture) are left out when WhatsApp does not share them.
+      security:
+        - sessionApiKey: []
+        - personalAccessToken: []
+      parameters:
+        - $ref: "#/components/parameters/SessionIDQuery"
+      responses:
+        "200":
+          description: The account.
+          headers:
+            X-RateLimit-Limit: { $ref: "#/components/headers/RateLimitLimit" }
+            X-RateLimit-Remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+            X-RateLimit-Reset: { $ref: "#/components/headers/RateLimitReset" }
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      jid: { type: string, examples: ["6281234567890@s.whatsapp.net"] }
+                      lid: { type: string, examples: ["74869920260158@lid"] }
+                      phone: { type: string, examples: ["+6281234567890"] }
+                      push_name: { type: string, description: The name the account shows to others. }
+                      about: { type: string }
+                      business_name: { type: string }
+                      picture_url: { type: string, format: uri }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "502": { $ref: "#/components/responses/WhatsAppError" }
+        "504": { $ref: "#/components/responses/RuntimeTimeout" }
+  /v1/presence:
+    post:
+      tags: [Account]
+      operationId: setPresence
+      summary: Show the account online or offline
+      description: |
+        `available` shows the account as online to its contacts, `unavailable` as offline. With the
+        session setting `always_online`, the account is set available again whenever it reconnects.
+      security:
+        - sessionApiKey: []
+        - personalAccessToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [state]
+              properties:
+                session_id: { $ref: "#/components/schemas/SessionIDField" }
+                state: { type: string, enum: [available, unavailable] }
+      responses:
+        "204":
+          description: Done.
+          headers:
+            X-RateLimit-Limit: { $ref: "#/components/headers/RateLimitLimit" }
+            X-RateLimit-Remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+            X-RateLimit-Reset: { $ref: "#/components/headers/RateLimitReset" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "502": { $ref: "#/components/responses/WhatsAppError" }
+        "504": { $ref: "#/components/responses/RuntimeTimeout" }
+  /v1/presence/chat:
+    post:
+      tags: [Account]
+      operationId: setChatPresence
+      summary: Show typing or recording in a chat
+      description: |
+        Shows "typing…" (`typing`) or "recording audio…" (`recording`) in a chat until you send
+        `paused` or a message, or WhatsApp clears it after a few seconds.
+      security:
+        - sessionApiKey: []
+        - personalAccessToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [chat, state]
+              properties:
+                session_id: { $ref: "#/components/schemas/SessionIDField" }
+                chat: { type: string, description: A phone number or a person's or group's JID., examples: ["+6281234567890"] }
+                state: { type: string, enum: [typing, recording, paused] }
+      responses:
+        "204":
+          description: Done.
+          headers:
+            X-RateLimit-Limit: { $ref: "#/components/headers/RateLimitLimit" }
+            X-RateLimit-Remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+            X-RateLimit-Reset: { $ref: "#/components/headers/RateLimitReset" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "502": { $ref: "#/components/responses/WhatsAppError" }
+        "504": { $ref: "#/components/responses/RuntimeTimeout" }
+  /v1/contacts:
+    get:
+      tags: [Contacts]
+      operationId: listContacts
+      summary: List contacts
+      description: |
+        The people the number knows: those saved in the phone's address book (`saved`), and
+        others it has seen a name for, such as people who messaged it. Saved contacts come first.
+      security:
+        - sessionApiKey: []
+        - personalAccessToken: []
+      parameters:
+        - $ref: "#/components/parameters/SessionIDQuery"
+      responses:
+        "200":
+          description: Contacts.
+          headers:
+            X-RateLimit-Limit: { $ref: "#/components/headers/RateLimitLimit" }
+            X-RateLimit-Remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+            X-RateLimit-Reset: { $ref: "#/components/headers/RateLimitReset" }
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { type: array, items: { $ref: "#/components/schemas/SavedContact" } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "502": { $ref: "#/components/responses/WhatsAppError" }
+        "504": { $ref: "#/components/responses/RuntimeTimeout" }
+  /v1/contacts/blocklist:
+    get:
+      tags: [Contacts]
+      operationId: getBlocklist
+      summary: List blocked people
+      security:
+        - sessionApiKey: []
+        - personalAccessToken: []
+      parameters:
+        - $ref: "#/components/parameters/SessionIDQuery"
+      responses:
+        "200":
+          description: Blocked people.
+          headers:
+            X-RateLimit-Limit: { $ref: "#/components/headers/RateLimitLimit" }
+            X-RateLimit-Remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+            X-RateLimit-Reset: { $ref: "#/components/headers/RateLimitReset" }
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        jid: { type: string }
+                        phone: { type: string, description: "Absent when WhatsApp only shares the LID." }
+                        lid: { type: string }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "502": { $ref: "#/components/responses/WhatsAppError" }
+        "504": { $ref: "#/components/responses/RuntimeTimeout" }
+  /v1/contacts/{jid}/block:
+    post:
+      tags: [Contacts]
+      operationId: blockContact
+      summary: Block a person
+      description: Blocks a person, as Block in the WhatsApp app does. Use a phone number or their JID (`…@s.whatsapp.net` or `…@lid`).
+      security:
+        - sessionApiKey: []
+        - personalAccessToken: []
+      parameters:
+        - $ref: "#/components/parameters/ContactJID"
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                session_id: { $ref: "#/components/schemas/SessionIDField" }
+      responses:
+        "204":
+          description: Done.
+          headers:
+            X-RateLimit-Limit: { $ref: "#/components/headers/RateLimitLimit" }
+            X-RateLimit-Remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+            X-RateLimit-Reset: { $ref: "#/components/headers/RateLimitReset" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "502": { $ref: "#/components/responses/WhatsAppError" }
+        "504": { $ref: "#/components/responses/RuntimeTimeout" }
+  /v1/contacts/{jid}/unblock:
+    post:
+      tags: [Contacts]
+      operationId: unblockContact
+      summary: Unblock a person
+      description: Unblocks a person.
+      security:
+        - sessionApiKey: []
+        - personalAccessToken: []
+      parameters:
+        - $ref: "#/components/parameters/ContactJID"
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                session_id: { $ref: "#/components/schemas/SessionIDField" }
+      responses:
+        "204":
+          description: Done.
+          headers:
+            X-RateLimit-Limit: { $ref: "#/components/headers/RateLimitLimit" }
+            X-RateLimit-Remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+            X-RateLimit-Reset: { $ref: "#/components/headers/RateLimitReset" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "502": { $ref: "#/components/responses/WhatsAppError" }
+        "504": { $ref: "#/components/responses/RuntimeTimeout" }
+  /v1/contacts/{jid}/ids:
+    get:
+      tags: [Contacts]
+      operationId: getContactIDs
+      summary: Phone number and LID
+      description: |
+        WhatsApp may identify a person by their phone number (`…@s.whatsapp.net`) or by a privacy id
+        (`…@lid`), in groups especially. Give either and get both. A LID's number is known only when
+        WhatsApp shared it with this session; a number's LID is asked from WhatsApp when needed.
+      security:
+        - sessionApiKey: []
+        - personalAccessToken: []
+      parameters:
+        - $ref: "#/components/parameters/ContactJID"
+        - $ref: "#/components/parameters/SessionIDQuery"
+      responses:
+        "200":
+          description: Both ids; either may be absent when unknown.
+          headers:
+            X-RateLimit-Limit: { $ref: "#/components/headers/RateLimitLimit" }
+            X-RateLimit-Remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+            X-RateLimit-Reset: { $ref: "#/components/headers/RateLimitReset" }
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      phone: { type: string, examples: ["+6281234567890"] }
+                      lid: { type: string, examples: ["74869920260158@lid"] }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "502": { $ref: "#/components/responses/WhatsAppError" }
+        "504": { $ref: "#/components/responses/RuntimeTimeout" }
+  /v1/contacts/check:
+    post:
+      tags: [Contacts]
+      operationId: checkContacts
+      summary: Check numbers on WhatsApp
+      security:
+        - sessionApiKey: []
+        - personalAccessToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [phones]
+              properties:
+                session_id: { $ref: "#/components/schemas/SessionIDField" }
+                phones:
+                  type: array
+                  minItems: 1
+                  maxItems: 50
+                  items: { type: string, examples: ["+6281234567890"] }
+      responses:
+        "200":
+          description: One entry per number, in order.
+          headers:
+            X-RateLimit-Limit: { $ref: "#/components/headers/RateLimitLimit" }
+            X-RateLimit-Remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+            X-RateLimit-Reset: { $ref: "#/components/headers/RateLimitReset" }
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { type: array, items: { $ref: "#/components/schemas/Contact" } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "502": { $ref: "#/components/responses/WhatsAppError" }
+        "504": { $ref: "#/components/responses/RuntimeTimeout" }
+  /v1/contacts/{jid}:
+    get:
+      tags: [Contacts]
+      operationId: getContact
+      summary: Get contact info
+      security:
+        - sessionApiKey: []
+        - personalAccessToken: []
+      parameters:
+        - $ref: "#/components/parameters/ContactJID"
+        - $ref: "#/components/parameters/SessionIDQuery"
+      responses:
+        "200":
+          description: The contact.
+          headers:
+            X-RateLimit-Limit: { $ref: "#/components/headers/RateLimitLimit" }
+            X-RateLimit-Remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+            X-RateLimit-Reset: { $ref: "#/components/headers/RateLimitReset" }
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: { data: { $ref: "#/components/schemas/Contact" } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "502": { $ref: "#/components/responses/WhatsAppError" }
+        "504": { $ref: "#/components/responses/RuntimeTimeout" }
+  /v1/contacts/{jid}/picture:
+    get:
+      tags: [Contacts]
+      operationId: getContactPicture
+      summary: Get a profile picture
+      security:
+        - sessionApiKey: []
+        - personalAccessToken: []
+      parameters:
+        - $ref: "#/components/parameters/ContactJID"
+        - $ref: "#/components/parameters/SessionIDQuery"
+      responses:
+        "200":
+          description: The picture's URL, or `""` when there is none or it is not visible to this account.
+          headers:
+            X-RateLimit-Limit: { $ref: "#/components/headers/RateLimitLimit" }
+            X-RateLimit-Remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+            X-RateLimit-Reset: { $ref: "#/components/headers/RateLimitReset" }
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties: { url: { type: string } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "502": { $ref: "#/components/responses/WhatsAppError" }
+        "504": { $ref: "#/components/responses/RuntimeTimeout" }
+  /v1/groups:
+    get:
+      tags: [Groups]
+      operationId: listGroups
+      summary: List groups
+      security:
+        - sessionApiKey: []
+        - personalAccessToken: []
+      parameters:
+        - $ref: "#/components/parameters/SessionIDQuery"
+      responses:
+        "200":
+          description: Groups, without their participants.
+          headers:
+            X-RateLimit-Limit: { $ref: "#/components/headers/RateLimitLimit" }
+            X-RateLimit-Remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+            X-RateLimit-Reset: { $ref: "#/components/headers/RateLimitReset" }
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { type: array, items: { $ref: "#/components/schemas/Group" } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "502": { $ref: "#/components/responses/WhatsAppError" }
+        "504": { $ref: "#/components/responses/RuntimeTimeout" }
+    post:
+      tags: [Groups]
+      operationId: createGroup
+      summary: Create a group
+      description: |
+        The session's number becomes the group's admin. A person who cannot be added (their privacy
+        settings, say) is listed with `ok: false`; send them the invite link instead.
+      security:
+        - sessionApiKey: []
+        - personalAccessToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, participants]
+              properties:
+                session_id: { $ref: "#/components/schemas/SessionIDField" }
+                name: { type: string, maxLength: 25 }
+                participants: { type: array, minItems: 1, maxItems: 256, items: { type: string }, description: "Phone numbers or JIDs.", examples: [["+6281234567890"]] }
+      responses:
+        "200":
+          description: Created.
+          headers:
+            X-RateLimit-Limit: { $ref: "#/components/headers/RateLimitLimit" }
+            X-RateLimit-Remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+            X-RateLimit-Reset: { $ref: "#/components/headers/RateLimitReset" }
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      group: { $ref: "#/components/schemas/Group" }
+                      participants: { type: array, items: { $ref: "#/components/schemas/ParticipantResult" } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "502": { $ref: "#/components/responses/WhatsAppError" }
+        "504": { $ref: "#/components/responses/RuntimeTimeout" }
+  /v1/groups/join:
+    post:
+      tags: [Groups]
+      operationId: joinGroup
+      summary: Join a group by invite link
+      security:
+        - sessionApiKey: []
+        - personalAccessToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [link]
+              properties:
+                session_id: { $ref: "#/components/schemas/SessionIDField" }
+                link: { type: string, examples: ["https://chat.whatsapp.com/HDguN3U8HArDfoHFyCYFdT"] }
+      responses:
+        "200":
+          description: Joined.
+          headers:
+            X-RateLimit-Limit: { $ref: "#/components/headers/RateLimitLimit" }
+            X-RateLimit-Remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+            X-RateLimit-Reset: { $ref: "#/components/headers/RateLimitReset" }
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { type: object, properties: { jid: { type: string } } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "502": { $ref: "#/components/responses/WhatsAppError" }
+        "504": { $ref: "#/components/responses/RuntimeTimeout" }
+  /v1/groups/invite-info:
+    get:
+      tags: [Groups]
+      operationId: getGroupInviteInfo
+      summary: Look up an invite link
+      description: |
+        The group an invite link leads to, without joining it.
+      security:
+        - sessionApiKey: []
+        - personalAccessToken: []
+      parameters:
+        - name: link
+          in: query
+          required: true
+          schema: { type: string, examples: ["https://chat.whatsapp.com/HDguN3U8HArDfoHFyCYFdT"] }
+        - $ref: "#/components/parameters/SessionIDQuery"
+      responses:
+        "200":
+          description: The group.
+          headers:
+            X-RateLimit-Limit: { $ref: "#/components/headers/RateLimitLimit" }
+            X-RateLimit-Remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+            X-RateLimit-Reset: { $ref: "#/components/headers/RateLimitReset" }
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: { data: { $ref: "#/components/schemas/Group" } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "502": { $ref: "#/components/responses/WhatsAppError" }
+        "504": { $ref: "#/components/responses/RuntimeTimeout" }
+  /v1/groups/{jid}:
+    get:
+      tags: [Groups]
+      operationId: getGroup
+      summary: Get a group
+      security:
+        - sessionApiKey: []
+        - personalAccessToken: []
+      parameters:
+        - name: jid
+          in: path
+          required: true
+          schema: { type: string, examples: ["120363012345678901@g.us"] }
+        - $ref: "#/components/parameters/SessionIDQuery"
+      responses:
+        "200":
+          description: The group with its participants.
+          headers:
+            X-RateLimit-Limit: { $ref: "#/components/headers/RateLimitLimit" }
+            X-RateLimit-Remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+            X-RateLimit-Reset: { $ref: "#/components/headers/RateLimitReset" }
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: { data: { $ref: "#/components/schemas/Group" } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "502": { $ref: "#/components/responses/WhatsAppError" }
+        "504": { $ref: "#/components/responses/RuntimeTimeout" }
+    patch:
+      tags: [Groups]
+      operationId: updateGroup
+      summary: Change a group
+      description: |
+        Send any of the fields. The session's number must be an admin.
+      security:
+        - sessionApiKey: []
+        - personalAccessToken: []
+      parameters:
+        - name: jid
+          in: path
+          required: true
+          schema: { type: string, examples: ["120363012345678901@g.us"] }
+        - $ref: "#/components/parameters/SessionIDQuery"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              minProperties: 1
+              properties:
+                name: { type: string, maxLength: 25 }
+                topic: { type: string, maxLength: 2048, description: "The description; `\"\"` removes it." }
+                announce: { type: boolean, description: Only admins can send messages. }
+                locked: { type: boolean, description: "Only admins can change the group's name, description and picture." }
+      responses:
+        "204":
+          description: Changed.
+          headers:
+            X-RateLimit-Limit: { $ref: "#/components/headers/RateLimitLimit" }
+            X-RateLimit-Remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+            X-RateLimit-Reset: { $ref: "#/components/headers/RateLimitReset" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "502": { $ref: "#/components/responses/WhatsAppError" }
+        "504": { $ref: "#/components/responses/RuntimeTimeout" }
+  /v1/groups/{jid}/participants:
+    post:
+      tags: [Groups]
+      operationId: updateGroupParticipants
+      summary: Add, remove, promote or demote members
+      description: |
+        The session's number must be an admin. Each person's outcome is listed; someone who cannot be
+        added (their privacy settings, or they left recently) can be sent the invite link.
+      security:
+        - sessionApiKey: []
+        - personalAccessToken: []
+      parameters:
+        - name: jid
+          in: path
+          required: true
+          schema: { type: string, examples: ["120363012345678901@g.us"] }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [action, participants]
+              properties:
+                session_id: { $ref: "#/components/schemas/SessionIDField" }
+                action: { type: string, enum: [add, remove, promote, demote] }
+                participants: { type: array, minItems: 1, maxItems: 50, items: { type: string }, description: Phone numbers or JIDs. }
+      responses:
+        "200":
+          description: Each person's outcome.
+          headers:
+            X-RateLimit-Limit: { $ref: "#/components/headers/RateLimitLimit" }
+            X-RateLimit-Remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+            X-RateLimit-Reset: { $ref: "#/components/headers/RateLimitReset" }
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: "#/components/schemas/ParticipantResult" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "502": { $ref: "#/components/responses/WhatsAppError" }
+        "504": { $ref: "#/components/responses/RuntimeTimeout" }
+  /v1/groups/{jid}/picture:
+    put:
+      tags: [Groups]
+      operationId: setGroupPicture
+      summary: Set a group's picture
+      description: |
+        A JPEG image, by `url` or `media_id` (from `POST /v1/media`). The session's number must be an admin.
+      security:
+        - sessionApiKey: []
+        - personalAccessToken: []
+      parameters:
+        - name: jid
+          in: path
+          required: true
+          schema: { type: string, examples: ["120363012345678901@g.us"] }
+        - $ref: "#/components/parameters/SessionIDQuery"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                url: { type: string, format: uri }
+                media_id: { type: string }
+      responses:
+        "204":
+          description: Set.
+          headers:
+            X-RateLimit-Limit: { $ref: "#/components/headers/RateLimitLimit" }
+            X-RateLimit-Remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+            X-RateLimit-Reset: { $ref: "#/components/headers/RateLimitReset" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "502": { $ref: "#/components/responses/WhatsAppError" }
+        "504": { $ref: "#/components/responses/RuntimeTimeout" }
+  /v1/groups/{jid}/invite-link:
+    get:
+      tags: [Groups]
+      operationId: getGroupInviteLink
+      summary: Get a group's invite link
+      description: |
+        The session's number must be an admin.
+      security:
+        - sessionApiKey: []
+        - personalAccessToken: []
+      parameters:
+        - name: jid
+          in: path
+          required: true
+          schema: { type: string, examples: ["120363012345678901@g.us"] }
+        - $ref: "#/components/parameters/SessionIDQuery"
+      responses:
+        "200":
+          description: The link.
+          headers:
+            X-RateLimit-Limit: { $ref: "#/components/headers/RateLimitLimit" }
+            X-RateLimit-Remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+            X-RateLimit-Reset: { $ref: "#/components/headers/RateLimitReset" }
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { type: object, properties: { link: { type: string, examples: ["https://chat.whatsapp.com/HDguN3U8HArDfoHFyCYFdT"] } } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "502": { $ref: "#/components/responses/WhatsAppError" }
+        "504": { $ref: "#/components/responses/RuntimeTimeout" }
+  /v1/groups/{jid}/invite-link/reset:
+    post:
+      tags: [Groups]
+      operationId: resetGroupInviteLink
+      summary: Reset a group's invite link
+      description: |
+        The old link stops working.
+      security:
+        - sessionApiKey: []
+        - personalAccessToken: []
+      parameters:
+        - name: jid
+          in: path
+          required: true
+          schema: { type: string, examples: ["120363012345678901@g.us"] }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                session_id: { $ref: "#/components/schemas/SessionIDField" }
+      responses:
+        "200":
+          description: The new link.
+          headers:
+            X-RateLimit-Limit: { $ref: "#/components/headers/RateLimitLimit" }
+            X-RateLimit-Remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+            X-RateLimit-Reset: { $ref: "#/components/headers/RateLimitReset" }
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { type: object, properties: { link: { type: string } } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "502": { $ref: "#/components/responses/WhatsAppError" }
+        "504": { $ref: "#/components/responses/RuntimeTimeout" }
+  /v1/groups/{jid}/leave:
+    post:
+      tags: [Groups]
+      operationId: leaveGroup
+      summary: Leave a group
+      security:
+        - sessionApiKey: []
+        - personalAccessToken: []
+      parameters:
+        - name: jid
+          in: path
+          required: true
+          schema: { type: string, examples: ["120363012345678901@g.us"] }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                session_id: { $ref: "#/components/schemas/SessionIDField" }
+      responses:
+        "204":
+          description: Left.
+          headers:
+            X-RateLimit-Limit: { $ref: "#/components/headers/RateLimitLimit" }
+            X-RateLimit-Remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+            X-RateLimit-Reset: { $ref: "#/components/headers/RateLimitReset" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "502": { $ref: "#/components/responses/WhatsAppError" }
+        "504": { $ref: "#/components/responses/RuntimeTimeout" }
+  /v1/sessions:
+    get:
+      tags: [Sessions]
+      operationId: listSessions
+      summary: List sessions
+      responses:
+        "200":
+          description: The workspace's sessions, oldest first.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { type: array, items: { $ref: "#/components/schemas/Session" } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+    post:
+      tags: [Sessions]
+      operationId: createSession
+      summary: Create a session
+      description: |
+        Creates a session and starts pairing: get the QR code from `GET /v1/sessions/{id}/qr` (or the
+        event stream), or ask for a pairing code. The session's API key is in this answer only; store it.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string, minLength: 1, maxLength: 100, examples: ["Support line"] }
+                phone:
+                  type: string
+                  description: The number to link, with its country code. Used for pairing codes.
+                  examples: ["+6281234567890"]
+                settings:
+                  $ref: "#/components/schemas/SessionSettings"
+                  description: Sent whole; keys you leave out are false. Without it, only `account_protection` is on.
+                proxy_url: { $ref: "#/components/schemas/ProxyURL" }
+      responses:
+        "201":
+          description: Created.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  session: { $ref: "#/components/schemas/Session" }
+                  api_key: { type: string, description: Shown once., examples: ["wsk_…"] }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403":
+          description: The workspace has reached its session limit, or is suspended (`not_allowed`).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+  /v1/sessions/{id}:
+    parameters:
+      - $ref: "#/components/parameters/SessionID"
+    get:
+      tags: [Sessions]
+      operationId: getSession
+      summary: Get a session
+      responses:
+        "200":
+          description: The session.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Session" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    patch:
+      tags: [Sessions]
+      operationId: updateSession
+      summary: Update a session
+      description: Changing the proxy of a linked session reconnects it.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string, minLength: 1, maxLength: 100 }
+                settings:
+                  $ref: "#/components/schemas/SessionSettings"
+                  description: Replaces all settings; send every key.
+                proxy_url:
+                  $ref: "#/components/schemas/ProxyURL"
+                  description: '`""` removes the proxy.'
+      responses:
+        "200":
+          description: The updated session.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Session" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      tags: [Sessions]
+      operationId: deleteSession
+      summary: Delete a session
+      description: Logs the number out of WhatsApp and deletes the session.
+      responses:
+        "204": { description: Deleted. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /v1/sessions/{id}/connect:
+    parameters:
+      - $ref: "#/components/parameters/SessionID"
+    post:
+      tags: [Sessions]
+      operationId: connectSession
+      summary: Connect
+      description: Connects a linked session, or starts pairing for one that is not linked. The outcome arrives as status changes.
+      responses:
+        "202": { description: Accepted. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "402": { $ref: "#/components/responses/Suspended" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /v1/sessions/{id}/restart:
+    parameters:
+      - $ref: "#/components/parameters/SessionID"
+    post:
+      tags: [Sessions]
+      operationId: restartSession
+      summary: Restart
+      description: Drops the connection and connects again, without a new scan.
+      responses:
+        "202": { description: Accepted. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "402": { $ref: "#/components/responses/Suspended" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /v1/sessions/{id}/disconnect:
+    parameters:
+      - $ref: "#/components/parameters/SessionID"
+    post:
+      tags: [Sessions]
+      operationId: disconnectSession
+      summary: Disconnect
+      description: Logs the number out of WhatsApp. The session stays; linking again needs a new scan.
+      responses:
+        "202": { description: Accepted. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /v1/sessions/{id}/qr:
+    parameters:
+      - $ref: "#/components/parameters/SessionID"
+    get:
+      tags: [Sessions]
+      operationId: getSessionQR
+      summary: Get the QR code
+      description: |
+        The current pairing QR as WhatsApp's raw string; draw it with any QR library. WhatsApp replaces
+        it every 20 to 60 seconds, so poll this or use the event stream. `""` when there is no QR to scan.
+      responses:
+        "200":
+          description: Status and QR.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { $ref: "#/components/schemas/SessionStatus" }
+                  qr_code: { type: string, examples: ["2@Xq9…"] }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /v1/sessions/{id}/pairing-code:
+    parameters:
+      - $ref: "#/components/parameters/SessionID"
+    post:
+      tags: [Sessions]
+      operationId: requestPairingCode
+      summary: Get a pairing code
+      description: |
+        An 8-character code to enter on the phone (WhatsApp → Linked devices → Link with phone number)
+        instead of scanning a QR code. Waits up to 30 seconds for WhatsApp.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                phone:
+                  type: string
+                  description: Defaults to the session's `phone`.
+                  examples: ["+6281234567890"]
+      responses:
+        "200":
+          description: The code.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: { pair_code: { type: string, examples: ["ABCD1234"] } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "402": { $ref: "#/components/responses/Suspended" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: The session is already linked (`already_linked`).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "502":
+          description: WhatsApp gave no code (`pairing_failed`).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "504": { $ref: "#/components/responses/RuntimeTimeout" }
+  /v1/sessions/{id}/api-key:
+    parameters:
+      - $ref: "#/components/parameters/SessionID"
+    post:
+      tags: [Sessions]
+      operationId: regenerateApiKey
+      summary: Regenerate the API key
+      description: The old key stops working at once.
+      responses:
+        "200":
+          description: The new key, shown once.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: { api_key: { type: string, examples: ["wsk_…"] } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /v1/sessions/{id}/logs:
+    parameters:
+      - $ref: "#/components/parameters/SessionID"
+    get:
+      tags: [Sessions]
+      operationId: getSessionLogs
+      summary: Session logs
+      description: The last 100 session events, newest first.
+      responses:
+        "200":
+          description: Events.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { type: array, items: { $ref: "#/components/schemas/SessionEvent" } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /v1/sessions/{id}/events:
+    parameters:
+      - $ref: "#/components/parameters/SessionID"
+    get:
+      tags: [Sessions]
+      operationId: streamSessionEvents
+      summary: Stream status and QR changes
+      description: |
+        Server-sent events. The first `state` event is the current state; another follows on every
+        change of status, QR code or phone. A `: ping` comment every 25 seconds keeps the connection
+        open. Connections last up to an hour; reconnect when one closes.
+      responses:
+        "200":
+          description: |
+            `text/event-stream` of `event: state` lines whose `data` is a StreamState.
+          content:
+            text/event-stream:
+              schema: { $ref: "#/components/schemas/StreamState" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /v1/sessions/{id}/messages:
+    parameters:
+      - $ref: "#/components/parameters/SessionID"
+    delete:
+      tags: [Sessions]
+      operationId: clearMessages
+      summary: Clear the message log
+      description: Deletes the session's finished messages. Messages still waiting to be sent stay.
+      responses:
+        "204": { description: Cleared. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /v1/sessions/{id}/webhook:
+    parameters:
+      - $ref: "#/components/parameters/SessionID"
+    get:
+      tags: [Webhook]
+      operationId: getWebhook
+      summary: Get the webhook
+      responses:
+        "200":
+          description: The configuration and the events you can subscribe to.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  webhook: { $ref: "#/components/schemas/WebhookConfig" }
+                  available_events: { type: array, items: { $ref: "#/components/schemas/WebhookEvent" } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    put:
+      tags: [Webhook]
+      operationId: setWebhook
+      summary: Set the webhook
+      description: The signing secret is created on the first save and kept afterwards.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                url:
+                  type: string
+                  format: uri
+                  maxLength: 2048
+                  description: A public https URL; `""` turns the webhook off.
+                  examples: ["https://example.com/warsita/webhook"]
+                events:
+                  type: array
+                  description: Only these events are delivered.
+                  items: { $ref: "#/components/schemas/WebhookEvent" }
+      responses:
+        "200":
+          description: Saved.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: { webhook: { $ref: "#/components/schemas/WebhookConfig" } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /v1/sessions/{id}/webhook/secret:
+    parameters:
+      - $ref: "#/components/parameters/SessionID"
+    post:
+      tags: [Webhook]
+      operationId: rotateWebhookSecret
+      summary: Rotate the signing secret
+      description: Deliveries are signed with the new secret from now on.
+      responses:
+        "200":
+          description: The new secret.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: { secret: { type: string, examples: ["whsec_…"] } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /v1/sessions/{id}/webhook/test:
+    parameters:
+      - $ref: "#/components/parameters/SessionID"
+    post:
+      tags: [Webhook]
+      operationId: testWebhook
+      summary: Send a sample event
+      description: |
+        Sends a signed sample of an event to the webhook URL now, whether or not the event is
+        subscribed. It is not retried and not logged.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [event]
+              properties:
+                event: { $ref: "#/components/schemas/WebhookEvent" }
+      responses:
+        "200":
+          description: The result, also when your endpoint failed.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  delivered: { type: boolean }
+                  status_code: { type: integer, description: 0 when the connection failed. }
+                  error: { type: string }
+                  duration_ms: { type: integer }
+                  payload: { $ref: "#/components/schemas/WebhookEnvelope" }
+        "400":
+          description: Unknown event (`validation_error`) or no webhook URL (`no_webhook`).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /v1/sessions/{id}/webhook/deliveries:
+    parameters:
+      - $ref: "#/components/parameters/SessionID"
+    get:
+      tags: [Webhook]
+      operationId: listWebhookDeliveries
+      summary: Delivery log
+      description: The last 50 deliveries, newest first.
+      responses:
+        "200":
+          description: Deliveries.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { type: array, items: { $ref: "#/components/schemas/WebhookDelivery" } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /v1/sessions/{id}/webhook/deliveries/{delivery}/resend:
+    parameters:
+      - $ref: "#/components/parameters/SessionID"
+      - name: delivery
+        in: path
+        required: true
+        schema: { type: string, examples: ["whd_5bT8nR1kW3qZ9xM2vL7p"] }
+    post:
+      tags: [Webhook]
+      operationId: resendWebhookDelivery
+      summary: Resend a delivery
+      description: |
+        Queues a delivered or failed event again as a new delivery (a new `X-Warsita-Delivery`), to the
+        current webhook URL and signed with the current secret. The body is the same envelope, with its
+        original `timestamp`. Failed deliveries keep their content for this; delivered ones keep it only
+        when message logging is on.
+      responses:
+        "202":
+          description: Queued as a new delivery.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: { data: { $ref: "#/components/schemas/WebhookDelivery" } }
+        "400":
+          description: The session has no webhook URL (`no_webhook`).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: The delivery is still being retried, or its content was not kept (`not_resendable`).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+  /health:
+    get:
+      tags: [Health]
+      operationId: health
+      summary: Health check
+      security: []
+      responses:
+        "200":
+          description: Up.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: { status: { type: string, const: ok } }
+        "503":
+          description: The database is unreachable.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: { status: { type: string, const: unavailable } }
+webhooks:
+  messages.received:
+    post:
+      summary: A message was received (any chat).
+      description: Sent for every received message. The chat-specific events below are sent as well, so subscribe to one or the other.
+      requestBody: { $ref: "#/components/requestBodies/IncomingMessageEvent" }
+      responses: { "200": { description: Any 2xx acknowledges the delivery. } }
+  messages-personal.received:
+    post:
+      summary: A message was received in a personal chat.
+      requestBody: { $ref: "#/components/requestBodies/IncomingMessageEvent" }
+      responses: { "200": { description: Any 2xx acknowledges the delivery. } }
+  messages-group.received:
+    post:
+      summary: A message was received in a group.
+      requestBody: { $ref: "#/components/requestBodies/IncomingMessageEvent" }
+      responses: { "200": { description: Any 2xx acknowledges the delivery. } }
+  messages-newsletter.received:
+    post:
+      summary: A post was received from a channel.
+      requestBody: { $ref: "#/components/requestBodies/IncomingMessageEvent" }
+      responses: { "200": { description: Any 2xx acknowledges the delivery. } }
+  message.sent:
+    post:
+      summary: A message sent through the API reached WhatsApp.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: "#/components/schemas/WebhookEnvelope"
+                - properties:
+                    data:
+                      type: object
+                      properties:
+                        message_id: { type: string, description: Warsita's message id (`msg_…`). }
+                        wa_message_id: { type: string }
+                        to: { type: string }
+                        type: { $ref: "#/components/schemas/MessageType" }
+      responses: { "200": { description: Any 2xx acknowledges the delivery. } }
+  message-receipt.update:
+    post:
+      summary: Messages were delivered or read.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: "#/components/schemas/WebhookEnvelope"
+                - properties:
+                    data:
+                      type: object
+                      properties:
+                        chat: { type: string }
+                        recipient: { type: string, description: JID of the account that sent the receipt. }
+                        message_ids: { type: array, items: { type: string }, description: WhatsApp message ids. }
+                        status: { type: string, enum: [delivered, read] }
+                        timestamp: { type: string, format: date-time }
+      responses: { "200": { description: Any 2xx acknowledges the delivery. } }
+  messages.update:
+    post:
+      summary: A received message was edited.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: "#/components/schemas/WebhookEnvelope"
+                - properties:
+                    data:
+                      type: object
+                      properties:
+                        chat: { type: string }
+                        sender: { type: string }
+                        message_id: { type: string }
+                        text: { type: string }
+                        timestamp: { type: string, format: date-time }
+      responses: { "200": { description: Any 2xx acknowledges the delivery. } }
+  messages.delete:
+    post:
+      summary: A received message was deleted for everyone.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: "#/components/schemas/WebhookEnvelope"
+                - properties:
+                    data:
+                      type: object
+                      properties:
+                        chat: { type: string }
+                        sender: { type: string }
+                        message_id: { type: string }
+                        timestamp: { type: string, format: date-time }
+      responses: { "200": { description: Any 2xx acknowledges the delivery. } }
+  messages.reaction:
+    post:
+      summary: Someone reacted to a message.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: "#/components/schemas/WebhookEnvelope"
+                - properties:
+                    data:
+                      type: object
+                      properties:
+                        chat: { type: string }
+                        sender: { type: string }
+                        sender_phone: { type: string }
+                        message_id: { type: string }
+                        emoji: { type: string, description: '`""` when a reaction is removed.' }
+                        timestamp: { type: string, format: date-time }
+      responses: { "200": { description: Any 2xx acknowledges the delivery. } }
+  poll.vote:
+    post:
+      summary: Someone voted on a poll the session sent.
+      description: Votes on polls sent from the phone or by others are not reported. A vote that is taken back arrives with an empty `selected`.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: "#/components/schemas/WebhookEnvelope"
+                - properties:
+                    data:
+                      type: object
+                      properties:
+                        chat: { type: string }
+                        voter: { type: string }
+                        voter_phone: { type: string }
+                        message_id: { type: string, description: "The poll's id in Warsita (`msg_…`)." }
+                        poll_message_id: { type: string, description: "The poll's WhatsApp id." }
+                        selected: { type: array, items: { type: string }, description: "The options this person picks now, by name." }
+                        timestamp: { type: string, format: date-time }
+      responses: { "200": { description: Any 2xx acknowledges the delivery. } }
+  message.status:
+    post:
+      summary: A message sent through the API changed status.
+      description: "Sent for `sent`, `delivered`, `read` and `failed`. Deliveries can arrive out of order: keep the most advanced status (`read` over `delivered` over `sent`)."
+      requestBody:
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: "#/components/schemas/WebhookEnvelope"
+                - properties:
+                    data:
+                      type: object
+                      properties:
+                        message_id: { type: string, description: "The message in Warsita (`msg_…`)." }
+                        wa_message_id: { type: string }
+                        to: { type: string }
+                        type: { $ref: "#/components/schemas/MessageType" }
+                        status: { type: string, enum: [sent, delivered, read, failed] }
+                        error: { type: string, description: Only for `failed`. }
+                        timestamp: { type: string, format: date-time }
+      responses: { "200": { description: Any 2xx acknowledges the delivery. } }
+  chats.update:
+    post:
+      summary: A chat was changed on the phone.
+      description: "Each event carries the one setting that changed. Changes replayed by a full sync are not sent."
+      requestBody:
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: "#/components/schemas/WebhookEnvelope"
+                - properties:
+                    data:
+                      type: object
+                      properties:
+                        chat: { type: string }
+                        chat_type: { type: string, enum: [personal, group, newsletter, broadcast] }
+                        phone: { type: string, description: "The person's number, for a personal chat named by LID when the number is known." }
+                        archived: { type: boolean }
+                        pinned: { type: boolean }
+                        muted: { type: boolean }
+                        muted_until: { type: string, format: date-time, description: "When a timed mute ends." }
+                        read: { type: boolean, description: "`false` when marked unread." }
+                        cleared: { type: boolean, description: "The chat's messages were cleared." }
+                        timestamp: { type: string, format: date-time }
+      responses: { "200": { description: Any 2xx acknowledges the delivery. } }
+  chats.delete:
+    post:
+      summary: A chat was deleted on the phone.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: "#/components/schemas/WebhookEnvelope"
+                - properties:
+                    data:
+                      type: object
+                      properties:
+                        chat: { type: string }
+                        chat_type: { type: string }
+                        timestamp: { type: string, format: date-time }
+      responses: { "200": { description: Any 2xx acknowledges the delivery. } }
+  contacts.update:
+    post:
+      summary: Someone's name changed.
+      description: "Their name in the phone's address book (`name`), the name they set themselves (`push_name`, noticed when they message), or their verified business name. Each event carries the name that changed."
+      requestBody:
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: "#/components/schemas/WebhookEnvelope"
+                - properties:
+                    data:
+                      type: object
+                      properties:
+                        jid: { type: string }
+                        phone: { type: string }
+                        name: { type: string }
+                        push_name: { type: string }
+                        business_name: { type: string }
+                        timestamp: { type: string, format: date-time }
+      responses: { "200": { description: Any 2xx acknowledges the delivery. } }
+  session.status:
+    post:
+      summary: The session's status changed.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: "#/components/schemas/WebhookEnvelope"
+                - properties:
+                    data:
+                      type: object
+                      properties:
+                        status: { $ref: "#/components/schemas/SessionStatus" }
+                        event: { type: string, examples: [connected, logged_out] }
+                        reason: { type: string }
+                        phone: { type: string }
+      responses: { "200": { description: Any 2xx acknowledges the delivery. } }
+  qrcode.updated:
+    post:
+      summary: A new pairing QR code is ready.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: "#/components/schemas/WebhookEnvelope"
+                - properties:
+                    data:
+                      type: object
+                      properties: { qr_code: { type: string } }
+      responses: { "200": { description: Any 2xx acknowledges the delivery. } }
+  call:
+    post:
+      summary: Someone is calling the number.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: "#/components/schemas/WebhookEnvelope"
+                - properties:
+                    data:
+                      type: object
+                      properties:
+                        call_id: { type: string }
+                        from: { type: string }
+                        from_phone: { type: string }
+                        is_group: { type: boolean }
+                        timestamp: { type: string, format: date-time }
+      responses: { "200": { description: Any 2xx acknowledges the delivery. } }
+  groups.update:
+    post:
+      summary: A group's name, description or settings changed.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: "#/components/schemas/WebhookEnvelope"
+                - properties:
+                    data:
+                      type: object
+                      properties:
+                        group: { type: string }
+                        by: { type: string }
+                        changes:
+                          type: object
+                          properties:
+                            name: { type: string }
+                            topic: { type: string }
+                            announce: { type: boolean }
+                            locked: { type: boolean }
+                        timestamp: { type: string, format: date-time }
+      responses: { "200": { description: Any 2xx acknowledges the delivery. } }
+  group-participants.update:
+    post:
+      summary: Members were added, removed, promoted or demoted.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: "#/components/schemas/WebhookEnvelope"
+                - properties:
+                    data:
+                      type: object
+                      properties:
+                        group: { type: string }
+                        action: { type: string, enum: [add, remove, promote, demote] }
+                        participants: { type: array, items: { type: string } }
+                        by: { type: string }
+                        timestamp: { type: string, format: date-time }
+      responses: { "200": { description: Any 2xx acknowledges the delivery. } }
+components:
+  securitySchemes:
+    sessionApiKey:
+      type: http
+      scheme: bearer
+      description: A session's API key (`wsk_…`), shown when the session is created or its key regenerated.
+    personalAccessToken:
+      type: http
+      scheme: bearer
+      description: A workspace's personal access token (`wsp_…`), from Settings → Access Tokens in the dashboard.
+  parameters:
+    SessionID:
+      name: id
+      in: path
+      required: true
+      schema: { type: string, examples: ["ses_3kV9mQ2pX7aL0zR5tN8w"] }
+    SessionIDQuery:
+      name: session_id
+      in: query
+      description: The session to use. Required with a personal access token; ignored with an API key.
+      schema: { type: string, examples: ["ses_3kV9mQ2pX7aL0zR5tN8w"] }
+    ContactJID:
+      name: jid
+      in: path
+      required: true
+      description: A phone number with its country code, or a JID.
+      schema: { type: string, examples: ["6281234567890", "6281234567890@s.whatsapp.net"] }
+  headers:
+    RateLimitLimit:
+      description: Requests allowed per minute for this credential.
+      schema: { type: integer, examples: [600] }
+    RateLimitRemaining:
+      description: Requests left in the current minute.
+      schema: { type: integer, examples: [598] }
+    RateLimitReset:
+      description: Seconds until the count resets.
+      schema: { type: integer, examples: [41] }
+  requestBodies:
+    IncomingMessageEvent:
+      content:
+        application/json:
+          schema:
+            allOf:
+              - $ref: "#/components/schemas/WebhookEnvelope"
+              - properties:
+                  data: { $ref: "#/components/schemas/IncomingMessage" }
+  responses:
+    BadRequest:
+      description: The request is not valid JSON (`invalid_json`) or a field is wrong (`validation_error`).
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example: { error: { code: validation_error, message: "Text is required (or one of image, video, audio, document, location, contact)." } }
+    Unauthorized:
+      description: Missing or invalid credentials (`unauthorized`).
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    NotFound:
+      description: No such session or message in this workspace (`not_found`).
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Suspended:
+      description: The workspace's plan was not renewed (`workspace_suspended`). Sessions stay linked.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    RateLimited:
+      description: More than 600 requests in the current minute for this API key, or for the workspace with a token (`rate_limited`). Retry after `Retry-After` seconds.
+      headers:
+        Retry-After:
+          description: Seconds until the limit resets.
+          schema: { type: integer, examples: [12] }
+        X-RateLimit-Limit: { $ref: "#/components/headers/RateLimitLimit" }
+        X-RateLimit-Remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+        X-RateLimit-Reset: { $ref: "#/components/headers/RateLimitReset" }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    WhatsAppError:
+      description: WhatsApp refused the request, or the session is not connected (`whatsapp_error`).
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    RuntimeTimeout:
+      description: WhatsApp did not answer in time (`runtime_timeout`). Retry in a moment.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code: { type: string, examples: [validation_error] }
+            message: { type: string }
+    SessionIDField:
+      type: string
+      description: The session to use. Required with a personal access token; ignored with an API key.
+      examples: ["ses_3kV9mQ2pX7aL0zR5tN8w"]
+    SessionStatus:
+      type: string
+      enum: [need_scan, connecting, connected, disconnected, logged_out, banned, paused]
+      description: |
+        `need_scan`: waiting for a QR scan or pairing code. `connecting`, `connected`, `disconnected`:
+        the link to WhatsApp. `logged_out`: logged out from the phone; link again. `banned`: WhatsApp
+        banned the number. `paused`: the workspace is suspended; the number stays linked.
+    SessionSettings:
+      type: object
+      properties:
+        account_protection: { type: boolean, description: Shows "typing…" and waits 1–4 seconds before each message. }
+        message_logging: { type: boolean, description: Keeps message content and webhook bodies after delivery. }
+        read_incoming: { type: boolean, description: Marks incoming messages as read. }
+        reject_calls: { type: boolean, description: Rejects incoming calls. }
+        always_online: { type: boolean, description: Shows the account as online. }
+        ignore_groups: { type: boolean, description: No webhooks for group messages. }
+        ignore_broadcasts: { type: boolean, description: No webhooks for broadcast lists and statuses. }
+        ignore_channels: { type: boolean, description: No webhooks for channel posts. }
+        download_media: { type: boolean, description: "Keeps received images, video, audio, documents and stickers for 30 days and links them in `messages.received` (`media.id`, `media.url`)." }
+    ProxyURL:
+      type: string
+      description: |
+        `http://`, `https://` or `socks5://` proxy on a public host name (no IP address), e.g.
+        `socks5://user:pass@proxy.example.com:1080`.
+    Session:
+      type: object
+      properties:
+        id: { type: string, examples: ["ses_3kV9mQ2pX7aL0zR5tN8w"] }
+        workspace_id: { type: string }
+        name: { type: string }
+        phone: { type: string, description: '`""` until linked.', examples: ["+6281234567890"] }
+        status: { $ref: "#/components/schemas/SessionStatus" }
+        status_reason: { type: string }
+        api_key_last4: { type: string }
+        linked: { type: boolean, description: A WhatsApp account is linked. }
+        settings: { $ref: "#/components/schemas/SessionSettings" }
+        proxy_url: { type: string }
+        last_active_at: { type: [string, "null"], format: date-time }
+        created_at: { type: string, format: date-time }
+    SessionEvent:
+      type: object
+      properties:
+        id: { type: integer }
+        type:
+          type: string
+          examples: [created, connecting, qr_ready, paired, connected, disconnected, logged_out, banned, paused, api_key_regenerated]
+        data: { type: object }
+        created_at: { type: string, format: date-time }
+    StreamState:
+      type: object
+      description: Empty fields are left out.
+      properties:
+        session_id: { type: string }
+        workspace_id: { type: string }
+        type: { type: string, const: state }
+        status: { $ref: "#/components/schemas/SessionStatus" }
+        reason: { type: string }
+        phone: { type: string }
+        qr_code: { type: string }
+    MessageType:
+      type: string
+      enum: [text, image, video, audio, document, sticker, location, contact, poll]
+    MessageStatus:
+      type: string
+      enum: [queued, sending, sent, delivered, read, failed]
+    Media:
+      type: object
+      description: Give either `url` or `media_id`.
+      properties:
+        url: { type: string, format: uri, description: A public http(s) URL. }
+        media_id: { type: string, description: "A file uploaded with `POST /v1/media`.", examples: ["med_4hT8kW2nQ9xZ1vB7cR5p"] }
+        caption: { type: string }
+        filename: { type: string, description: Shown for documents. }
+        mimetype: { type: string, description: Overrides the type detected from the file. }
+        ptt: { type: boolean, description: "Audio only: send as a voice note." }
+    SendMessage:
+      type: object
+      required: [to]
+      properties:
+        session_id: { $ref: "#/components/schemas/SessionIDField" }
+        to:
+          type: string
+          description: |
+            A phone number with its country code (`+6281234567890`), or a JID: a person
+            (`…@s.whatsapp.net`, `…@lid`), a group (`…@g.us`) or a channel (`…@newsletter`).
+        text: { type: string, maxLength: 65536, description: "The message, or nothing when sending media." }
+        image: { $ref: "#/components/schemas/Media" }
+        video: { $ref: "#/components/schemas/Media" }
+        audio: { $ref: "#/components/schemas/Media" }
+        document: { $ref: "#/components/schemas/Media" }
+        sticker:
+          allOf:
+            - $ref: "#/components/schemas/Media"
+          description: A WebP image of up to 1 MB (512×512 px works best). `caption` is ignored.
+        location:
+          type: object
+          required: [latitude, longitude]
+          properties:
+            latitude: { type: number, minimum: -90, maximum: 90 }
+            longitude: { type: number, minimum: -180, maximum: 180 }
+            name: { type: string }
+            address: { type: string }
+        contact:
+          type: object
+          required: [name, phone]
+          properties:
+            name: { type: string }
+            phone: { type: string }
+        poll:
+          type: object
+          required: [name, options]
+          description: Votes on it arrive as `poll.vote` webhooks.
+          properties:
+            name: { type: string, maxLength: 255, description: The question. }
+            options:
+              type: array
+              minItems: 2
+              maxItems: 12
+              description: Different answers of up to 100 characters each.
+              items: { type: string, maxLength: 100 }
+            selectable_count: { type: integer, minimum: 0, description: "How many options one person may pick; `0` (the default) means any number." }
+        mentions:
+          type: array
+          maxItems: 1024
+          description: Numbers or JIDs to mention; write `@<number>` in the text where each appears.
+          items: { type: string }
+        reply_to:
+          type: object
+          required: [id]
+          description: Quote an earlier message in this chat.
+          properties:
+            id: { type: string, description: "The quoted message's WhatsApp id: `id` from `messages.received`, or `wa_message_id` of a message you sent.", examples: ["3EB0A1B2C3D4E5F6"] }
+            sender: { type: string, description: "Who wrote it (`sender` from `messages.received`). Required in groups; defaults to the person you are writing to." }
+            text: { type: string, description: The quoted text to show above your message. }
+        view_once:
+          type: boolean
+          description: "Images, video and audio: the recipient can open it only once."
+    Message:
+      type: object
+      properties:
+        id: { type: string, examples: ["msg_8sJq2LwP0aZx4TnB6kRv"] }
+        session_id: { type: string }
+        to: { type: string }
+        type: { $ref: "#/components/schemas/MessageType" }
+        payload: { type: [object, "null"], description: "The request as sent; `null` once sent when message logging is off. Polls and failed messages keep it, so votes can be named and failures resent." }
+        wa_message_id: { type: string, description: '`""` until sent.' }
+        status: { $ref: "#/components/schemas/MessageStatus" }
+        error: { type: string, description: "Why it failed, or the last retry's reason." }
+        attempts: { type: integer }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    MediaFile:
+      type: object
+      properties:
+        id: { type: string, examples: ["med_4hT8kW2nQ9xZ1vB7cR5p"] }
+        session_id: { type: string, description: "The session it came from or was uploaded with; absent for uploads with a token." }
+        kind: { type: string, enum: [upload, incoming] }
+        mimetype: { type: string }
+        size: { type: integer }
+        filename: { type: string }
+        created_at: { type: string, format: date-time }
+        expires_at: { type: string, format: date-time, description: "Uploads last 7 days, received media 30 days." }
+    SavedContact:
+      type: object
+      properties:
+        jid: { type: string }
+        phone: { type: string, description: "Absent for a LID whose number WhatsApp has not shared." }
+        name: { type: string, description: The name saved in the phone's address book. }
+        push_name: { type: string, description: The name the person set for themselves. }
+        business_name: { type: string }
+        saved: { type: boolean, description: In the phone's address book. }
+    ParticipantResult:
+      type: object
+      properties:
+        jid: { type: string }
+        phone: { type: string }
+        ok: { type: boolean }
+        error: { type: string, description: "Why it did not work for this person, e.g. their privacy settings." }
+    Contact:
+      type: object
+      properties:
+        jid: { type: string, description: '`""` when the number is not on WhatsApp.' }
+        phone: { type: string }
+        on_whatsapp: { type: boolean }
+        business_name: { type: string, description: Verified business accounts only. }
+        status: { type: string, description: The account's about text. }
+    Group:
+      type: object
+      properties:
+        jid: { type: string, examples: ["120363012345678901@g.us"] }
+        name: { type: string }
+        topic: { type: string }
+        owner: { type: string }
+        created_at: { type: string, format: date-time }
+        announce: { type: boolean, description: Only admins can send messages. }
+        size: { type: integer }
+        participants:
+          type: array
+          description: Only in `GET /v1/groups/{jid}`.
+          items:
+            type: object
+            properties:
+              jid: { type: string }
+              phone: { type: string }
+              is_admin: { type: boolean }
+              is_super_admin: { type: boolean }
+    WebhookEvent:
+      type: string
+      enum:
+        - messages.received
+        - messages-personal.received
+        - messages-group.received
+        - messages-newsletter.received
+        - message.sent
+        - poll.vote
+        - message.status
+        - chats.update
+        - chats.delete
+        - contacts.update
+        - message-receipt.update
+        - messages.update
+        - messages.delete
+        - messages.reaction
+        - session.status
+        - qrcode.updated
+        - call
+        - groups.update
+        - group-participants.update
+    WebhookConfig:
+      type: object
+      properties:
+        url: { type: string }
+        secret: { type: string, description: Signing secret (`whsec_…`). }
+        events: { type: array, items: { $ref: "#/components/schemas/WebhookEvent" } }
+    WebhookDelivery:
+      type: object
+      properties:
+        id: { type: string, examples: ["whd_5bT8nR1kW3qZ9xM2vL7p"] }
+        event: { $ref: "#/components/schemas/WebhookEvent" }
+        status: { type: string, enum: [pending, sending, delivered, failed] }
+        attempts: { type: integer }
+        last_status_code: { type: [integer, "null"] }
+        last_error: { type: string }
+        last_duration_ms: { type: [integer, "null"] }
+        next_attempt_at: { type: string, format: date-time }
+        created_at: { type: string, format: date-time }
+        body: { type: object, description: "The envelope sent; emptied once delivered unless message logging is on. Failed deliveries keep it so they can be resent." }
+    WebhookEnvelope:
+      type: object
+      description: |
+        Every delivery is a POST with this body and the headers `X-Warsita-Event`, `X-Warsita-Delivery`
+        (the same on retries) and `X-Warsita-Signature: t=<unix seconds>,v1=<hex HMAC-SHA256 of
+        "<t>.<raw body>" keyed with the webhook secret>`. Answer 2xx within 10 seconds; otherwise it is
+        retried after 10 seconds, 1 minute, 5 minutes, 30 minutes and 2 hours.
+      properties:
+        event: { $ref: "#/components/schemas/WebhookEvent" }
+        session_id: { type: string }
+        timestamp: { type: string, format: date-time }
+        data: { type: object }
+    IncomingMessage:
+      type: object
+      properties:
+        id: { type: string, description: WhatsApp message id. }
+        chat: { type: string, description: The chat's JID. }
+        chat_type: { type: string, enum: [personal, group, newsletter, broadcast] }
+        sender: { type: string, description: The sender's JID; may be `…@lid`. }
+        sender_phone: { type: string, description: "The sender's number, also in groups, when known." }
+        push_name: { type: string, description: The sender's display name. }
+        timestamp: { type: string, format: date-time }
+        type: { type: string, enum: [text, image, video, audio, document, sticker, location, contact, other] }
+        text: { type: string }
+        media:
+          type: object
+          properties:
+            id: { type: string, description: "With `download_media` on: the kept file, for `GET /v1/media/{id}`.", examples: ["med_4hT8kW2nQ9xZ1vB7cR5p"] }
+            url: { type: string, format: uri, description: "With `download_media` on: a link to download the file for 24 hours." }
+            error: { type: string, description: "With `download_media` on: why the file could not be kept." }
+            mimetype: { type: string }
+            file_length: { type: integer }
+            caption: { type: string }
+            filename: { type: string }
+            seconds: { type: integer }
+            ptt: { type: boolean }
+        location:
+          type: object
+          properties:
+            latitude: { type: number }
+            longitude: { type: number }
+            name: { type: string }
+            address: { type: string }
+        contact:
+          type: object
+          properties:
+            name: { type: string }
+            vcard: { type: string }
+        mentions: { type: array, items: { type: string } }
+        quoted_id: { type: string, description: The id of the message this one replies to. }
+        quoted_sender: { type: string }
+        is_view_once: { type: boolean }

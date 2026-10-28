@@ -1,0 +1,28 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "warsita"
+version = "0.1.0"
+description = "Official Python client for the Warsita WhatsApp API: send messages, manage sessions, contacts and groups, and verify webhooks."
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.9"
+dependencies = ["httpx>=0.25,<1"]
+keywords = ["whatsapp", "whatsapp-api", "warsita", "webhook", "messaging"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "License :: OSI Approved :: MIT License",
+  "Typing :: Typed",
+]
+
+[project.urls]
+Homepage = "https://warsita.com"
+Documentation = "https://warsita.com/docs"
+
+[project.optional-dependencies]
+test = ["pytest>=8", "pyyaml>=6"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/warsita"]
