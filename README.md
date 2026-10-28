@@ -51,6 +51,16 @@ sessions = warsita.sessions.list()
 warsita.groups.list(session_id=sessions[1]["id"])  # or per call
 ```
 
+With several numbers, a token can let Warsita pick one per message ([sender rotation](https://warsita.com/docs/messages#sender-rotation)): of the sessions with the `rotation` setting on, the one that wrote to this person longest ago.
+
+```python
+message = warsita.messages.send(rotate=True, to="+6281234567890", text="Your invoice is due on 1 November.")
+print(message["from"], message["session_id"])
+warsita.messages.get(message["id"])  # no session needed
+```
+
+Sessions can be private to the member who creates them: `warsita.sessions.create(name="My number", visibility="private")`.
+
 ## Receive webhooks
 
 Pass the raw body, not parsed JSON:

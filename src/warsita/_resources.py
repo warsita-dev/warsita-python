@@ -30,11 +30,14 @@ class Messages(_Resource):
         """Queue a message: ``send(to="+62…", text="Hi")``, or ``image={"url": …}``, ``poll={…}``, ….
 
         An Idempotency-Key is generated (or pass your own), so the client retries safely: a
-        repeat returns the message the first request queued.
+        repeat returns the message the first request queued. With a personal access token,
+        ``rotate=True`` sends from the workspace's sender rotation instead of a session; the
+        answer's ``from`` is the number it goes out from.
         """
         key = idempotency_key or str(uuid.uuid4())
+        scoped = not message.get("rotate")
         return self._t.request(
-            Call("POST", "/v1/messages", body=message, headers={"Idempotency-Key": key}, scoped=True, idempotent=True), session_id
+            Call("POST", "/v1/messages", body=message, headers={"Idempotency-Key": key}, scoped=scoped, idempotent=True), session_id
         )
 
     def list(self, *, limit: Optional[int] = None, status: Optional[str] = None, before: Optional[str] = None, session_id: Optional[str] = None) -> Any:
@@ -43,7 +46,9 @@ class Messages(_Resource):
         )
 
     def get(self, id: str, *, session_id: Optional[str] = None) -> Any:
-        return self._t.request(Call("GET", f"/v1/messages/{_p(id)}", scoped=True, idempotent=True), session_id)
+        """A message by id. A token needs no session for this (``session_id`` is ignored), so
+        messages sent with rotation are found too."""
+        return self._t.request(Call("GET", f"/v1/messages/{_p(id)}", idempotent=True), session_id)
 
     def edit(self, id: str, text: str, *, session_id: Optional[str] = None) -> Any:
         """Change a sent text message, within 20 minutes of sending."""

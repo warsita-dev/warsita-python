@@ -73,6 +73,15 @@ def test_a_token_adds_session_id():
         client(Recorder(), api_key="wsp_token").contacts.list()
 
 
+def test_rotate_sends_without_session_id_and_get_needs_no_session():
+    rec = Recorder((202, {"data": {"id": "msg_1", "from": "+6281100000001", "rotation": True}}, {}), (200, {"data": {}}, {}))
+    w = client(rec, api_key="wsp_token", session_id="ses_a")
+    assert w.messages.send(rotate=True, to="+6281234567890", text="Hi")["from"] == "+6281100000001"
+    assert rec.body(0) == {"rotate": True, "to": "+6281234567890", "text": "Hi"}
+    client(rec, api_key="wsp_token").messages.get("msg_1")
+    assert "session_id" not in rec.requests[1].url.params
+
+
 def test_whole_responses_and_no_content():
     rec = Recorder((201, {"session": {"id": "ses_1"}, "api_key": "wsk_new"}, {}), (204, None, {}))
     w = client(rec, api_key="wsp_token")
