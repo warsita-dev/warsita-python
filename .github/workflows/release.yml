@@ -1,0 +1,23 @@
+# Publishes to PyPI when a tag like v0.1.0 is pushed. Uses PyPI trusted publishing (OIDC):
+# add this repository, workflow (release.yml) and environment (pypi) as a trusted publisher of
+# the "warsita" project on pypi.org first; no token is stored.
+name: Release
+on:
+  push:
+    tags: ["v*"]
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install build -e ".[test]"
+      - run: test "v$(python -c 'import warsita; print(warsita.__version__)')" = "$GITHUB_REF_NAME"
+      - run: pytest -q
+      - run: python -m build
+      - uses: pypa/gh-action-pypi-publish@release/v1
