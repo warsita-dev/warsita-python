@@ -12,7 +12,7 @@ from typing import Any, AsyncIterator, Dict, Iterator, Mapping, Optional, Tuple
 
 import httpx
 
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 DEFAULT_BASE_URL = "https://api.warsita.com"
 
 
