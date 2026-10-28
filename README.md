@@ -6,7 +6,7 @@ The official Python client for the [Warsita](https://warsita.com) WhatsApp API: 
 pip install warsita
 ```
 
-Python 3.9 or newer.
+Python 3.10 or newer.
 
 ## Send a message
 

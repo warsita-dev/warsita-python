@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "Official Python client for the Warsita WhatsApp API: send messages, manage sessions, contacts and groups, and verify webhooks."
 readme = "README.md"
 license = "MIT"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 dependencies = ["httpx>=0.25,<1"]
 keywords = ["whatsapp", "whatsapp-api", "warsita", "webhook", "messaging"]
 classifiers = [
