@@ -101,6 +101,14 @@ def test_rate_limits_retry_and_keep_the_idempotency_key():
     assert len({r.headers["Idempotency-Key"] for r in rec.requests}) == 1
 
 
+def test_a_429_without_retry_after_is_not_retried():
+    rec = Recorder((429, {"error": {"code": "trial_limit", "message": "The free trial sends up to 100 messages a day."}}, {}))
+    with pytest.raises(WarsitaError) as err:
+        client(rec).messages.send(to="+6281234567890", text="Hi")
+    assert (err.value.status, err.value.code) == (429, "trial_limit")
+    assert len(rec.requests) == 1
+
+
 def test_server_errors_are_not_retried_when_unsafe():
     rec = Recorder((504, {"error": {"code": "runtime_timeout", "message": "WhatsApp did not answer in time."}}, {}))
     with pytest.raises(WarsitaError) as err:

@@ -70,9 +70,12 @@ def _retry_after(response: httpx.Response) -> Optional[float]:
 
 
 def _retryable(call: Call, response: httpx.Response) -> bool:
-    # A rate-limited call was not processed, so any call may retry; server errors only when
-    # repeating it is harmless.
-    return response.status_code == 429 or (call.idempotent and response.status_code in (500, 503, 504))
+    # A rate-limited call (429 with Retry-After) was not processed, so any call may retry; other
+    # 429s (recipient_limit, trial_limit) would fail again. Server errors retry only when
+    # repeating the call is harmless.
+    if response.status_code == 429:
+        return _retry_after(response) is not None
+    return call.idempotent and response.status_code in (500, 503, 504)
 
 
 def _delay(attempt: int, response: Optional[httpx.Response]) -> float:
